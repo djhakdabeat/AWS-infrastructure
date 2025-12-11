@@ -1,0 +1,575 @@
+# Multi-Account Strategy
+
+## Overview
+
+This document outlines our AWS multi-account architecture using AWS Organizations, designed to provide strong security boundaries, simplified billing, and compliance with financial services regulations.
+
+## Table of Contents
+
+- [Account Structure](#account-structure)
+- [AWS Organizations](#aws-organizations)
+- [Control Tower](#control-tower)
+- [Service Control Policies](#service-control-policies)
+- [Account Provisioning](#account-provisioning)
+- [Cross-Account Access](#cross-account-access)
+- [Billing and Cost Management](#billing-and-cost-management)
+
+## Account Structure
+
+### Organizational Units (OUs)
+
+```
+Root
+├── Security OU
+│   ├── Security Tooling Account
+│   ├── Log Archive Account
+│   └── Audit Account
+├── Production OU
+│   ├── Production Account
+│   └── Production-DR Account
+├── Non-Production OU
+│   ├── Development Account
+│   ├── Staging Account
+│   └── Testing Account
+├── Infrastructure OU
+│   ├── Network Account
+│   └── Shared Services Account
+└── Suspended OU
+    └── (Decommissioned accounts)
+```
+
+### Account Details
+
+| Account Name | Account ID | Purpose | Contact |
+|--------------|------------|---------|---------|
+| Management (Root) | 111111111111 | AWS Organizations management | cloud-admin@company.com |
+| Security Tooling | 222222222222 | GuardDuty, Security Hub, Macie | security@company.com |
+| Log Archive | 333333333333 | Centralized logging, immutable storage | compliance@company.com |
+| Audit | 444444444444 | Read-only audit access | audit@company.com |
+| Production | 555555555555 | Production workloads | production@company.com |
+| Production-DR | 666666666666 | Disaster recovery | production@company.com |
+| Development | 777777777777 | Development environments | dev@company.com |
+| Staging | 888888888888 | Pre-production testing | qa@company.com |
+| Network | 999999999999 | Transit Gateway, Direct Connect | network@company.com |
+| Shared Services | 101010101010 | DNS, AD, monitoring | infrastructure@company.com |
+
+## AWS Organizations
+
+### Organization Configuration
+
+```hcl
+resource "aws_organizations_organization" "main" {
+  aws_service_access_principals = [
+    "cloudtrail.amazonaws.com",
+    "config.amazonaws.com",
+    "guardduty.amazonaws.com",
+    "securityhub.amazonaws.com",
+    "sso.amazonaws.com",
+    "account.amazonaws.com"
+  ]
+  
+  enabled_policy_types = [
+    "SERVICE_CONTROL_POLICY",
+    "TAG_POLICY",
+    "BACKUP_POLICY"
+  ]
+  
+  feature_set = "ALL"
+}
+```
+
+### Organizational Units
+
+**Security OU**
+- Purpose: Centralized security tooling
+- SCPs: Read-only except for security tools
+- Access: Security team only
+
+**Production OU**
+- Purpose: Live production workloads
+- SCPs: Strict controls, no manual changes
+- Access: Limited to ops team with approval
+
+**Non-Production OU**
+- Purpose: Development and testing
+- SCPs: More permissive, innovation-friendly
+- Access: Development teams
+
+**Infrastructure OU**
+- Purpose: Shared infrastructure services
+- SCPs: Network team only
+- Access: Infrastructure team
+
+## Control Tower
+
+### Landing Zone
+
+AWS Control Tower provides:
+- Pre-configured multi-account environment
+- Guardrails (preventive and detective)
+- Account Factory for automated provisioning
+- Centralized dashboard
+
+### Guardrails Enabled
+
+**Mandatory Guardrails (Always Enabled)**
+
+| Guardrail | Type | Purpose |
+|-----------|------|---------|
+| Disallow policy changes on log archive | Preventive | Protect audit logs |
+| Detect public write access to S3 | Detective | Prevent data exposure |
+| Detect root account access | Detective | Monitor privileged access |
+| Enable CloudTrail | Preventive | Audit trail required |
+| Detect MFA for root | Detective | Root account security |
+
+**Strongly Recommended Guardrails**
+
+| Guardrail | Type | Purpose |
+|-----------|------|---------|
+| Disallow internet connection via RDP | Preventive | Prevent unauthorized access |
+| Disallow public read access to S3 | Preventive | Data protection |
+| Detect CloudTrail logging changes | Detective | Audit integrity |
+| Detect unauthorized API calls | Detective | Security monitoring |
+| Enable encryption for EBS | Preventive | Data at rest encryption |
+
+**Custom Guardrails (Financial Services)**
+
+| Guardrail | Type | Purpose |
+|-----------|------|---------|
+| Require approved regions only | Preventive | Data sovereignty |
+| Disallow database public access | Preventive | PCI-DSS compliance |
+| Require encryption for all S3 | Preventive | Data protection |
+| Detect unencrypted RDS | Detective | Compliance monitoring |
+| Require VPC Flow Logs | Preventive | Network monitoring |
+
+### Account Factory
+
+Automated account provisioning with:
+- Standardized baseline configuration
+- Pre-configured VPC
+- Centralized logging
+- Security tooling enabled
+- Compliance guardrails
+
+```yaml
+# Account Factory Blueprint
+account_name: "production-app-1"
+email: "aws-prod-app1@company.com"
+organizational_unit: "Production"
+vpc_configuration:
+  vpc_cidr: "10.1.0.0/16"
+  subnets:
+    - type: "public"
+      cidr: "10.1.1.0/24"
+    - type: "private"
+      cidr: "10.1.11.0/24"
+    - type: "isolated"
+      cidr: "10.1.21.0/24"
+security_baseline:
+  - cloudtrail
+  - config
+  - guardduty
+  - securityhub
+  - vpc_flow_logs
+```
+
+## Service Control Policies
+
+### SCP Hierarchy
+
+```
+Root SCP (applies to all)
+├── Security OU SCP (additional restrictions)
+├── Production OU SCP (strict controls)
+├── Non-Production OU SCP (more permissive)
+└── Infrastructure OU SCP (network controls)
+```
+
+### Root-Level SCP (DenyList)
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyLeavingOrganization",
+      "Effect": "Deny",
+      "Action": [
+        "organizations:LeaveOrganization"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyRegionRestriction",
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": [
+            "us-east-1",
+            "us-west-2"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyRootAccountUsage",
+      "Effect": "Deny",
+      "Action": "*",
+      "Resource": "*",
+      "Condition": {
+        "StringLike": {
+          "aws:PrincipalArn": "arn:aws:iam::*:root"
+        }
+      }
+    }
+  ]
+}
+```
+
+### Production SCP
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyUnencryptedStorage",
+      "Effect": "Deny",
+      "Action": [
+        "s3:PutObject",
+        "ec2:RunInstances"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "Bool": {
+          "aws:SecureTransport": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyPublicDBAccess",
+      "Effect": "Deny",
+      "Action": [
+        "rds:CreateDBInstance",
+        "rds:ModifyDBInstance"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "Bool": {
+          "rds:PubliclyAccessible": "true"
+        }
+      }
+    },
+    {
+      "Sid": "RequireMFAForSensitiveActions",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:TerminateInstances",
+        "rds:DeleteDBInstance",
+        "s3:DeleteBucket"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "BoolIfExists": {
+          "aws:MultiFactorAuthPresent": "false"
+        }
+      }
+    }
+  ]
+}
+```
+
+### Security OU SCP
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ProtectCloudTrail",
+      "Effect": "Deny",
+      "Action": [
+        "cloudtrail:DeleteTrail",
+        "cloudtrail:StopLogging",
+        "cloudtrail:UpdateTrail"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:PrincipalArn": "arn:aws:iam::*:role/SecurityAdmin"
+        }
+      }
+    },
+    {
+      "Sid": "ProtectGuardDuty",
+      "Effect": "Deny",
+      "Action": [
+        "guardduty:DeleteDetector",
+        "guardduty:DisassociateFromMasterAccount"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+## Account Provisioning
+
+### Standard Process
+
+1. **Request Submission**
+   - Submit via ServiceNow/JIRA
+   - Include: purpose, owner, OU, compliance requirements
+
+2. **Approval Workflow**
+   - Manager approval
+   - Security team review
+   - Compliance verification
+
+3. **Automated Provisioning**
+   - Account Factory creates account
+   - Baseline configuration applied
+   - Security tooling enabled
+   - Logging configured
+
+4. **Handoff**
+   - Credentials delivered securely
+   - Documentation provided
+   - Training scheduled
+
+### Account Baseline
+
+Every new account includes:
+
+```yaml
+baseline_configuration:
+  security:
+    - CloudTrail (organization trail)
+    - GuardDuty (member account)
+    - Security Hub (enabled)
+    - Config (recording enabled)
+    - VPC Flow Logs
+  
+  networking:
+    - Default VPC deleted
+    - Custom VPC created
+    - Transit Gateway attachment
+    - Security groups (deny-all default)
+  
+  compliance:
+    - Encryption enabled (S3, EBS)
+    - Backup policy applied
+    - Tagging policy enforced
+    - Config rules (PCI-DSS, SOX)
+  
+  monitoring:
+    - CloudWatch logs retention
+    - SNS topics for alerts
+    - EventBridge rules
+    - Systems Manager configured
+```
+
+## Cross-Account Access
+
+### Roles and Permissions
+
+**Administrator Access**
+```hcl
+resource "aws_iam_role" "cross_account_admin" {
+  name = "CrossAccountAdministrator"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        AWS = "arn:aws:iam::${var.management_account_id}:root"
+      }
+      Action = "sts:AssumeRole"
+      Condition = {
+        StringEquals = {
+          "sts:ExternalId" = random_string.external_id.result
+        }
+        Bool = {
+          "aws:MultiFactorAuthPresent" = "true"
+        }
+      }
+    }]
+  })
+  
+  managed_policy_arns = [
+    "arn:aws:iam::aws:policy/AdministratorAccess"
+  ]
+}
+```
+
+**Read-Only Access**
+```hcl
+resource "aws_iam_role" "cross_account_readonly" {
+  name = "CrossAccountReadOnly"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        AWS = [
+          "arn:aws:iam::${var.audit_account_id}:root",
+          "arn:aws:iam::${var.security_account_id}:root"
+        ]
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+  
+  managed_policy_arns = [
+    "arn:aws:iam::aws:policy/ReadOnlyAccess"
+  ]
+}
+```
+
+### AWS SSO Integration
+
+```yaml
+permission_sets:
+  - name: "NetworkAdministrator"
+    session_duration: "PT2H"
+    managed_policies:
+      - "arn:aws:iam::aws:policy/job-function/NetworkAdministrator"
+    accounts:
+      - network_account
+      - production_account
+    
+  - name: "SecurityAuditor"
+    session_duration: "PT4H"
+    managed_policies:
+      - "arn:aws:iam::aws:policy/SecurityAudit"
+    accounts:
+      - all_accounts
+    
+  - name: "DeveloperAccess"
+    session_duration: "PT8H"
+    managed_policies:
+      - "arn:aws:iam::aws:policy/PowerUserAccess"
+    accounts:
+      - development_account
+      - staging_account
+```
+
+## Billing and Cost Management
+
+### Consolidated Billing
+
+Benefits:
+- Single bill for all accounts
+- Volume discounts across organization
+- Reserved Instance sharing
+- Savings Plans sharing
+
+### Cost Allocation
+
+```hcl
+resource "aws_organizations_policy" "cost_allocation_tags" {
+  name        = "CostAllocationTags"
+  description = "Required cost allocation tags"
+  type        = "TAG_POLICY"
+  
+  content = jsonencode({
+    tags = {
+      CostCenter = {
+        tag_key = "CostCenter"
+        enforced_for = ["ec2:instance", "rds:db", "s3:bucket"]
+      }
+      Project = {
+        tag_key = "Project"
+        enforced_for = ["*"]
+      }
+      Environment = {
+        tag_key = "Environment"
+        enforced_for = ["*"]
+        tag_value = ["prod", "dev", "staging"]
+      }
+    }
+  })
+}
+```
+
+### Budget Alerts
+
+```hcl
+resource "aws_budgets_budget" "account_budget" {
+  for_each = var.accounts
+  
+  name         = "${each.key}-monthly-budget"
+  budget_type  = "COST"
+  limit_amount = each.value.budget_limit
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+  
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 80
+    threshold_type            = "PERCENTAGE"
+    notification_type         = "ACTUAL"
+    subscriber_email_addresses = [each.value.owner_email]
+  }
+}
+```
+
+## Governance
+
+### Account Lifecycle
+
+**Active** → **Suspended** → **Closed**
+
+- **Active**: Normal operations
+- **Suspended**: OU for temporary suspension, SCPs deny all
+- **Closed**: 90-day AWS retention, then deleted
+
+### Compliance Checks
+
+Monthly:
+- Review IAM users (prefer SSO)
+- Verify MFA on all accounts
+- Check for unused resources
+- Review cross-account access
+
+Quarterly:
+- Security posture review
+- Cost optimization review
+- Access review (remove stale permissions)
+- Compliance attestation
+
+## Security Considerations
+
+### Account Security Baseline
+
+- Root account MFA mandatory
+- No root account access keys
+- CloudTrail enabled
+- Config recording enabled
+- GuardDuty enabled
+- Security Hub enabled
+- VPC Flow Logs enabled
+
+### Incident Response
+
+Account-level incidents:
+1. Suspend account (move to Suspended OU)
+2. Deny all actions via SCP
+3. Investigate with read-only audit access
+4. Remediate or terminate
+
+## References
+
+- [AWS Organizations Best Practices](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_best-practices.html)
+- [AWS Control Tower Documentation](https://docs.aws.amazon.com/controltower/)
+- [Service Control Policies Examples](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_manage_policies_scps_examples.html)
+
+---
+
+**Document Version**: 1.0  
+**Last Updated**: 2025-12-11  
+**Owner**: Cloud Architecture Team
