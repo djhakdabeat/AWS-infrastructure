@@ -1,0 +1,423 @@
+# PCI-DSS v4.0 Compliance Controls
+
+## Overview
+
+This document maps our AWS infrastructure controls to PCI-DSS (Payment Card Industry Data Security Standard) version 4.0 requirements. PCI-DSS is mandatory for any organization that stores, processes, or transmits cardholder data.
+
+## Table of Contents
+
+- [Scope Definition](#scope-definition)
+- [Control Mappings](#control-mappings)
+- [Implementation Guide](#implementation-guide)
+- [Evidence Collection](#evidence-collection)
+- [Audit Preparation](#audit-preparation)
+
+## Scope Definition
+
+### Cardholder Data Environment (CDE)
+
+The CDE includes:
+- **Production VPC** (10.1.0.0/16): Contains applications processing card data
+- **Database Tier**: RDS instances storing cardholder data
+- **Application Tier**: Application servers with access to CDE
+- **Connected Systems**: Any system with network access to CDE
+
+### Out of Scope
+- Development VPC (no cardholder data)
+- Staging VPC (test data only, no real CHD)
+- Shared Services VPC (no direct CDE access)
+
+## Control Mappings
+
+### Requirement 1: Install and Maintain Network Security Controls
+
+#### 1.1 Processes and mechanisms for installing and maintaining network security controls
+
+**Control: Network segmentation and firewalls**
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 1.1.1 | Document network security controls | Architecture diagrams, network documentation | `/docs/architecture/01-network-design.md` |
+| 1.1.2 | Roles and responsibilities documented | RACI matrix, team assignments | Change management system |
+
+#### 1.2 Network security controls (NSCs) are configured and maintained
+
+**Control: Security Groups, NACLs, Network Firewall**
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 1.2.1 | Configuration standards for NSCs | Terraform modules with security baselines | `terraform/modules/security/` |
+| 1.2.2 | All inbound traffic blocked by default | Security Groups default deny | AWS Config rule: `restricted-ssh` |
+| 1.2.3 | NSCs installed between trusted/untrusted | Network Firewall in inspection VPC | Network Firewall logs |
+| 1.2.4 | Outbound traffic restrictions | Security Group egress rules | Security Group configurations |
+| 1.2.5 | All connections reviewed | Quarterly access reviews | Review meeting minutes |
+| 1.2.6 | NSCs between wireless and CDE | N/A - No wireless in AWS | Architecture documentation |
+| 1.2.7 | Configuration management | Infrastructure as Code (Terraform) | Git commit history |
+| 1.2.8 | Changes detected and alerted | AWS Config, Security Hub | CloudWatch alarms |
+
+#### 1.3 Network access to and from the CDE is restricted
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 1.3.1 | Inbound restricted to necessary | Security Groups, WAF rules | Security Group audit |
+| 1.3.2 | Outbound restricted to necessary | Security Groups, Network Firewall | Firewall rule review |
+| 1.3.3 | NSCs in multi-tenant environments | VPC isolation, tenant separation | VPC configuration |
+
+#### 1.4 Network connections between trusted and untrusted networks are controlled
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 1.4.1 | NSCs at each location | Network Firewall per VPC | Network architecture |
+| 1.4.2 | Inbound to CDE from untrusted restricted | ALB in DMZ, WAF rules | WAF configuration |
+| 1.4.3 | Anti-spoofing measures | AWS Shield, VPC ACLs | Shield configuration |
+| 1.4.4 | System components cannot communicate outside CDE | Isolated subnets, no IGW | Route table analysis |
+| 1.4.5 | NSC inventory | CMDB, Terraform state | Asset inventory report |
+
+#### 1.5 Risks to the CDE from computing devices are mitigated
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 1.5.1 | Security controls on devices | Systems Manager, endpoint protection | Patch compliance report |
+
+### Requirement 2: Apply Secure Configurations to All System Components
+
+#### 2.1 Processes and mechanisms for applying secure configurations
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 2.1.1 | Configuration standards documented | CIS benchmarks, hardening guides | `/docs/security/hardening-standards.md` |
+| 2.1.2 | Configuration standards reviewed | Quarterly security reviews | Review meeting minutes |
+
+#### 2.2 System components are configured securely
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 2.2.1 | Secure configuration implemented | AMI hardening, Systems Manager | Systems Manager compliance |
+| 2.2.2 | Vendor defaults changed | No default passwords, custom configs | Security scan results |
+| 2.2.3 | Primary functions on separate devices | Separate security groups per tier | Architecture diagram |
+| 2.2.4 | Unnecessary functionality removed | Minimal AMIs, only required services | AMI documentation |
+| 2.2.5 | Insecure services documented and secured | Service inventory, risk assessment | Risk register |
+| 2.2.6 | Security policies configured | Systems Manager policies | Policy documentation |
+| 2.2.7 | Encryption and non-console admin access | TLS 1.2+, SSH keys only | Certificate inventory |
+
+#### 2.3 Wireless environments are configured securely
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 2.3.1 | Wireless vendor defaults changed | N/A - Cloud infrastructure | N/A |
+| 2.3.2 | Wireless encryption enabled | N/A - Cloud infrastructure | N/A |
+
+### Requirement 3: Protect Stored Account Data
+
+#### 3.1 Processes and mechanisms for protecting stored account data
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 3.1.1 | Data retention policy | S3 lifecycle policies, RDS retention | Retention policy document |
+| 3.1.2 | CHD storage minimized | Data minimization practices | Data flow diagrams |
+
+#### 3.2 Storage of account data is kept to a minimum
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 3.2.1 | SAD not stored post-authorization | Application-level control | Code review |
+
+#### 3.3 SAD is stored securely
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 3.3.1 | PAN masked when displayed | Application-level masking | Application logs |
+| 3.3.1.1 | PAN displayed only when needed | Role-based access | IAM policies |
+| 3.3.2 | PAN unreadable when stored | RDS encryption, KMS | Encryption configuration |
+| 3.3.3 | PAN unreadable for removable media | EBS encryption, S3 encryption | Encryption audit |
+
+#### 3.4 Access to displays of full PAN and ability to copy cardholder data are restricted
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 3.4.1 | PAN masked when displayed | Application controls | UI screenshots |
+| 3.4.2 | Authorized users access full PAN | IAM roles, database grants | Access control matrix |
+
+#### 3.5 Primary account number is secured
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 3.5.1 | Cryptographic keys managed securely | AWS KMS, key rotation | KMS configuration |
+| 3.5.1.1 | Key custodians defined | IAM policies, separation of duties | Key management procedures |
+| 3.5.1.2 | Key generation in secure location | KMS in dedicated account | KMS account architecture |
+| 3.5.1.3 | Key distribution secure | IAM roles, no key export | Key distribution procedures |
+| 3.5.1.4 | Keys stored securely | KMS encryption | KMS audit |
+
+#### 3.6 Cryptographic keys are managed securely
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 3.6.1 | Key procedures documented | Key management policy | Policy document |
+| 3.6.1.1 | Key generation | KMS automatic generation | KMS configuration |
+| 3.6.1.2 | Key distribution | IAM policies | Access logs |
+| 3.6.1.3 | Key storage | KMS encrypted storage | KMS audit |
+| 3.6.1.4 | Periodic key changes | Automatic rotation enabled | Rotation configuration |
+
+#### 3.7 Cryptography is used to protect stored PAN
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 3.7.1 | Encryption method prevents decryption | KMS customer-managed keys | Encryption audit |
+| 3.7.2 | Device PANs and card data secured | EBS encryption, in-transit encryption | Full-disk encryption |
+| 3.7.3 | Media containing CHD secured | S3 encryption, MFA delete | S3 bucket policies |
+| 3.7.4 | Cryptographic keys stored securely | KMS, never exposed | Key storage procedures |
+| 3.7.5 | Key strength and algorithm | AES-256, RSA-2048 minimum | Encryption standards |
+| 3.7.6 | Key management procedures | Documented and followed | Key management audit |
+| 3.7.7 | Unauthorized decryption prevented | KMS policies, IAM | Encryption audit |
+| 3.7.8 | Key custodians acknowledge | Signed acknowledgment forms | HR records |
+| 3.7.9 | Split knowledge and dual control | Multiple key custodians | Procedures document |
+
+### Requirement 4: Protect Cardholder Data with Strong Cryptography During Transmission
+
+#### 4.1 Processes and mechanisms for protecting cardholder data in transmission
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 4.1.1 | Cryptographic protocols documented | TLS standards documented | Security policy |
+| 4.1.2 | Industry best practices followed | TLS 1.2+ only | ALB/CloudFront config |
+
+#### 4.2 PAN is protected with strong cryptography during transmission
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 4.2.1 | Strong crypto for transmission | TLS 1.2+, ACM certificates | TLS configuration |
+| 4.2.1.1 | Wireless encryption standards | N/A - Cloud infrastructure | N/A |
+| 4.2.1.2 | Keys/certificates managed securely | ACM automatic rotation | Certificate inventory |
+| 4.2.2 | PAN never sent via end-user messaging | Application control | Code review |
+
+### Requirement 5: Protect All Systems and Networks from Malicious Software
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 5.2.1 | Anti-malware deployed | Inspector, GuardDuty | Security tool configuration |
+| 5.2.2 | Anti-malware actively running | Continuous monitoring | GuardDuty findings |
+| 5.2.3 | Anti-malware cannot be disabled | Systems Manager enforcement | Policy enforcement |
+| 5.3.1 | Anti-malware updated | Automatic updates | Update logs |
+| 5.3.2 | Periodic scans performed | Inspector automated scans | Scan reports |
+| 5.3.3 | Scan reports generated | Security Hub dashboard | Monthly reports |
+| 5.3.4 | Malicious software detected/addressed | Automated response | Incident logs |
+
+### Requirement 6: Develop and Maintain Secure Systems and Software
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 6.2.3 | Hardware/software inventory | Systems Manager inventory | Asset database |
+| 6.2.4 | Software components identified | Software composition analysis | Dependency scans |
+| 6.3.1 | Security patch process | Systems Manager Patch Manager | Patch compliance reports |
+| 6.3.2 | Patches installed within 30 days | Automated patching | Patch status dashboard |
+| 6.3.3 | Patch implementation procedures | Patch management policy | Policy document |
+
+### Requirement 7: Restrict Access to System Components and Cardholder Data
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 7.2.1 | Access limited to job needs | IAM policies, least privilege | Access review |
+| 7.2.2 | Access assigned based on job | Role-based access control | IAM role assignments |
+| 7.2.3 | Required privileges documented | Permission matrix | RBAC documentation |
+| 7.2.4 | Access authorization documented | Approval workflows | ServiceNow tickets |
+| 7.2.5 | Application/system accounts assigned | Service roles with specific permissions | Service account inventory |
+| 7.3.1 | User identities managed | AWS SSO integration | SSO configuration |
+| 7.3.2 | MFA required for CDE access | IAM MFA enforcement | MFA compliance report |
+
+### Requirement 8: Identify Users and Authenticate Access to System Components
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 8.2.1 | Unique user IDs | AWS SSO, no shared accounts | User directory |
+| 8.2.2 | Shared accounts controlled | No shared accounts | Account audit |
+| 8.2.3 | Additional authentication for admin | MFA required | MFA compliance |
+| 8.2.4 | Invalid authentication attempts locked | Account lockout policies | SSO configuration |
+| 8.2.5 | Session timeout implemented | Session duration limits | Timeout configuration |
+| 8.3.1 | MFA for all access to CDE | IAM conditional access | Access logs |
+| 8.3.6 | Authentication factors unique | No shared MFA devices | MFA device inventory |
+| 8.4.1 | Multi-factor authentication devices secured | Hardware tokens in secure storage | Device inventory |
+
+### Requirement 9: Restrict Physical Access to Cardholder Data
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| All | Physical security | AWS responsibility (shared model) | AWS SOC 2 report |
+
+**Note**: Physical security is AWS's responsibility per the shared responsibility model. Request AWS compliance reports (SOC 2, ISO 27001) via AWS Artifact.
+
+### Requirement 10: Log and Monitor All Access to System Components and Cardholder Data
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 10.2.1 | Audit logs implemented | CloudTrail, VPC Flow Logs | Logging configuration |
+| 10.2.1.1 | User access recorded | CloudTrail API logs | CloudTrail logs |
+| 10.2.1.2 | Privileged actions recorded | CloudTrail with MFA flag | CloudTrail analysis |
+| 10.2.1.3 | Access to audit trails | CloudTrail bucket access logs | S3 access logs |
+| 10.2.1.4 | Invalid access attempts | GuardDuty findings | GuardDuty dashboard |
+| 10.2.1.5 | Changes to identification | IAM CloudTrail events | User modification logs |
+| 10.2.1.6 | Audit log initialization | CloudTrail trail creation | CloudTrail configuration |
+| 10.2.2 | Automated audit trails | CloudTrail enabled all regions | Multi-region trails |
+| 10.3.1 | Audit records retained 90+ days | S3 lifecycle policy | Retention configuration |
+| 10.3.2 | Logs protected from alteration | S3 Object Lock, MFA delete | S3 bucket policy |
+| 10.3.3 | Logs backed up promptly | S3 cross-region replication | Replication configuration |
+| 10.3.4 | Logs for external systems centralized | CloudWatch Logs aggregation | Log aggregation setup |
+| 10.4.1 | Time synchronization | NTP via VPC DHCP options | Time sync configuration |
+| 10.4.2 | Time data protected | VPC endpoint for NTP | Network configuration |
+| 10.4.3 | Critical time sources maintained | AWS-provided NTP | NTP configuration |
+| 10.5.1 | Audit logs reviewed daily | Security Hub dashboard | Review logs |
+| 10.6.1 | Automated detection of failures | CloudWatch alarms | Alarm configuration |
+| 10.7.1 | Failures detected and alerted | SNS notifications | Alert procedures |
+| 10.7.2 | Failures responded to promptly | Incident response procedures | Response documentation |
+
+### Requirement 11: Test Security of Systems and Networks Regularly
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 11.3.1 | Internal vulnerability scans quarterly | Inspector scheduled scans | Scan reports |
+| 11.3.2 | External vulnerability scans quarterly | Third-party ASV scans | ASV reports |
+| 11.4.1 | Segmentation testing annually | Network penetration testing | Pen test reports |
+| 11.5.1 | Intrusion detection deployed | GuardDuty | GuardDuty configuration |
+| 11.5.2 | Change detection on CHD pages | File integrity monitoring | FIM logs |
+| 11.6.1 | Security monitoring documented | Security operations procedures | Runbooks |
+
+### Requirement 12: Support Information Security with Organizational Policies
+
+| Sub-Req | Control | AWS Implementation | Evidence |
+|---------|---------|-------------------|----------|
+| 12.1.1 | Security policy established | Information security policy | Policy document |
+| 12.1.2 | Risk assessment conducted | Annual risk assessment | Risk assessment report |
+| 12.2.1 | Acceptable use policy | Acceptable use policy | Policy document |
+| 12.3.1 | Third-party providers listed | Vendor inventory | Vendor list |
+| 12.5.1 | Inventory of system components | Systems Manager inventory | Asset inventory |
+| 12.6.1 | Security awareness program | Annual training | Training records |
+| 12.8.1 | Service providers maintain PCI | AWS PCI-DSS attestation | AWS Artifact |
+| 12.10.1 | Incident response plan | IR plan documented | IR plan document |
+
+## Implementation Guide
+
+### Phase 1: Network Segmentation (Weeks 1-2)
+1. Deploy VPCs with proper CIDR allocation
+2. Configure Transit Gateway
+3. Implement Network Firewall
+4. Configure Security Groups and NACLs
+5. Enable VPC Flow Logs
+
+### Phase 2: Data Protection (Weeks 3-4)
+1. Enable KMS encryption for all data stores
+2. Configure RDS encryption
+3. Enable S3 bucket encryption
+4. Implement TLS 1.2+ everywhere
+5. Deploy ACM certificates
+
+### Phase 3: Access Control (Weeks 5-6)
+1. Configure AWS SSO
+2. Implement MFA enforcement
+3. Create least-privilege IAM policies
+4. Set up role-based access
+5. Configure session timeouts
+
+### Phase 4: Monitoring (Weeks 7-8)
+1. Enable CloudTrail in all regions
+2. Configure GuardDuty
+3. Set up Security Hub
+4. Deploy AWS Config rules
+5. Create CloudWatch alarms
+6. Integrate with SIEM
+
+### Phase 5: Testing & Validation (Weeks 9-10)
+1. Vulnerability scanning with Inspector
+2. Network penetration testing
+3. Access control testing
+4. Incident response drills
+5. Compliance validation
+
+## Evidence Collection
+
+### Automated Evidence
+```bash
+# CloudTrail logs
+aws cloudtrail lookup-events --max-results 50
+
+# Config compliance
+aws configservice describe-compliance-by-config-rule
+
+# Security Hub findings
+aws securityhub get-findings
+
+# GuardDuty findings
+aws guardduty list-findings --detector-id <detector-id>
+```
+
+### Manual Evidence
+- Network diagrams
+- Policy documents
+- Training records
+- Access review reports
+- Incident response logs
+- Penetration test reports
+- Vulnerability scan results
+
+## Audit Preparation
+
+### QSA (Qualified Security Assessor) Engagement
+
+**Pre-Audit Checklist:**
+- [ ] Evidence collection complete
+- [ ] Documentation up to date
+- [ ] Access provisioned for auditors
+- [ ] Demo environment prepared
+- [ ] Key personnel available
+- [ ] Previous findings remediated
+
+**Documentation Required:**
+- Network architecture diagrams
+- Data flow diagrams
+- System inventory
+- Security policies and procedures
+- Evidence of testing and monitoring
+- Training records
+- Incident response logs
+
+**Timeline:**
+- Weeks 1-2: Pre-audit preparation
+- Weeks 3-6: On-site audit activities
+- Weeks 7-8: Findings remediation
+- Weeks 9-10: Report of Compliance (ROC)
+
+### Annual Requirements
+
+| Activity | Frequency | Owner |
+|----------|-----------|-------|
+| Internal vulnerability scans | Quarterly | Security Team |
+| External vulnerability scans | Quarterly | ASV Provider |
+| Penetration testing | Annually | Third-party |
+| Security awareness training | Annually | All staff |
+| Risk assessment | Annually | Security Team |
+| Policy review | Annually | Compliance Team |
+
+## Continuous Compliance
+
+### Monitoring Dashboard
+- Real-time compliance score
+- Open findings by severity
+- Remediation SLA tracking
+- Audit trail analytics
+
+### Automated Reporting
+- Daily compliance summary
+- Weekly trend analysis
+- Monthly executive report
+- Quarterly audit package
+
+## References
+
+- [PCI-DSS v4.0 Requirements](https://www.pcisecuritystandards.org/)
+- [AWS PCI-DSS Compliance Guide](https://aws.amazon.com/compliance/pci-dss-level-1-faqs/)
+- [AWS PCI-DSS Attestation (via Artifact)](https://aws.amazon.com/artifact/)
+
+---
+
+**Document Version**: 1.0  
+**Last Updated**: 2025-12-11  
+**Owner**: Compliance Team  
+**Next Review**: 2026-01-11
