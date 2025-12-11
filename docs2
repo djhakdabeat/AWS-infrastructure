@@ -1,0 +1,724 @@
+# Security Layers - Defense in Depth
+
+## Overview
+
+This document details our defense-in-depth security architecture, implementing multiple layers of security controls to protect financial services workloads in AWS.
+
+## Security Layer Stack
+
+```
+Layer 7: Application Security (AWS WAF, API Gateway)
+Layer 6: Identity & Access (IAM, SSO, MFA)
+Layer 5: Data Security (KMS, Secrets Manager, Encryption)
+Layer 4: Compute Security (Instance hardening, patching)
+Layer 3: Network Security (Security Groups, NACLs, Network Firewall)
+Layer 2: Perimeter Security (Shield, WAF, CloudFront)
+Layer 1: Physical Security (AWS responsibility)
+```
+
+## Layer 1: AWS Shield - DDoS Protection
+
+### AWS Shield Standard
+- Automatic protection at no additional cost
+- Protection against common DDoS attacks
+- Layer 3 and Layer 4 protection
+
+### AWS Shield Advanced (Recommended for Production)
+
+**Features:**
+- Enhanced DDoS protection
+- 24/7 DDoS Response Team (DRT)
+- Cost protection (DDoS-related scaling charges)
+- Real-time attack diagnostics
+- Protection for EC2, ELB, CloudFront, Route 53, Global Accelerator
+
+**Configuration:**
+```hcl
+resource "aws_shield_protection" "alb" {
+  name         = "alb-protection"
+  resource_arn = aws_lb.main.arn
+}
+
+resource "aws_shield_protection_group" "production" {
+  protection_group_id = "prod-resources"
+  aggregation        = "MAX"
+  pattern            = "BY_RESOURCE_TYPE"
+  
+  resource_type = "APPLICATION_LOAD_BALANCER"
+  
+  members = [
+    aws_lb.main.arn,
+    aws_lb.api.arn
+  ]
+}
+```
+
+**Cost:** $3,000/month + data transfer
+
+## Layer 2: AWS WAF - Web Application Firewall
+
+### WAF Rules
+
+**Managed Rule Groups (AWS Managed):**
+- Core rule set (CRS)
+- Known bad inputs
+- SQL database
+- Linux operating system
+- POSIX operating system
+- Windows operating system
+- PHP application
+- WordPress application
+
+**Custom Rule Groups:**
+- Rate limiting
+- Geo-blocking
+- IP reputation lists
+- Custom business logic
+
+### WAF Configuration
+
+```hcl
+resource "aws_wafv2_web_acl" "main" {
+  name  = "production-waf"
+  scope = "REGIONAL"
+  
+  default_action {
+    allow {}
+  }
+  
+  # Rate limiting
+  rule {
+    name     = "RateLimitRule"
+    priority = 1
+    
+    statement {
+      rate_based_statement {
+        limit              = 2000
+        aggregate_key_type = "IP"
+      }
+    }
+    
+    action {
+      block {}
+    }
+    
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name               = "RateLimitRule"
+      sampled_requests_enabled  = true
+    }
+  }
+  
+  # AWS Managed - Core Rule Set
+  rule {
+    name     = "AWSManagedRulesCommonRuleSet"
+    priority = 2
+    
+    override_action {
+      none {}
+    }
+    
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesCommonRuleSet"
+        vendor_name = "AWS"
+        
+        # Exclude specific rules if needed
+        excluded_rule {
+          name = "SizeRestrictions_BODY"
+        }
+      }
+    }
+    
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name               = "AWSManagedRulesCommonRuleSet"
+      sampled_requests_enabled  = true
+    }
+  }
+  
+  # SQL Injection Protection
+  rule {
+    name     = "AWSManagedRulesSQLiRuleSet"
+    priority = 3
+    
+    override_action {
+      none {}
+    }
+    
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesSQLiRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+    
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name               = "SQLi"
+      sampled_requests_enabled  = true
+    }
+  }
+  
+  # Geo-blocking (block countries except US)
+  rule {
+    name     = "GeoBlockRule"
+    priority = 4
+    
+    statement {
+      not_statement {
+        statement {
+          geo_match_statement {
+            country_codes = ["US"]
+          }
+        }
+      }
+    }
+    
+    action {
+      block {}
+    }
+    
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name               = "GeoBlock"
+      sampled_requests_enabled  = true
+    }
+  }
+  
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name               = "ProductionWAF"
+    sampled_requests_enabled  = true
+  }
+}
+
+# Associate with ALB
+resource "aws_wafv2_web_acl_association" "alb" {
+  resource_arn = aws_lb.main.arn
+  web_acl_arn  = aws_wafv2_web_acl.main.arn
+}
+```
+
+### WAF Logging
+
+```hcl
+resource "aws_wafv2_web_acl_logging_configuration" "main" {
+  resource_arn            = aws_wafv2_web_acl.main.arn
+  log_destination_configs = [aws_kinesis_firehose_delivery_stream.waf_logs.arn]
+  
+  redacted_fields {
+    single_header {
+      name = "authorization"
+    }
+  }
+}
+```
+
+## Layer 3: AWS Network Firewall
+
+### Network Firewall Architecture
+
+```
+Internet → IGW → Network Firewall Endpoint → TGW → Inspection VPC → 
+TGW → Production VPC
+```
+
+### Firewall Configuration
+
+```hcl
+resource "aws_networkfirewall_firewall" "inspection" {
+  name                = "inspection-firewall"
+  firewall_policy_arn = aws_networkfirewall_firewall_policy.main.arn
+  vpc_id              = aws_vpc.inspection.id
+  
+  subnet_mapping {
+    subnet_id = aws_subnet.firewall_az1.id
+  }
+  
+  subnet_mapping {
+    subnet_id = aws_subnet.firewall_az2.id
+  }
+  
+  subnet_mapping {
+    subnet_id = aws_subnet.firewall_az3.id
+  }
+  
+  tags = {
+    Name = "inspection-firewall"
+  }
+}
+
+resource "aws_networkfirewall_firewall_policy" "main" {
+  name = "inspection-policy"
+  
+  firewall_policy {
+    stateless_default_actions          = ["aws:forward_to_sfe"]
+    stateless_fragment_default_actions = ["aws:forward_to_sfe"]
+    
+    stateless_rule_group_reference {
+      priority     = 1
+      resource_arn = aws_networkfirewall_rule_group.stateless_allow.arn
+    }
+    
+    stateful_rule_group_reference {
+      resource_arn = aws_networkfirewall_rule_group.block_domains.arn
+    }
+    
+    stateful_rule_group_reference {
+      resource_arn = aws_networkfirewall_rule_group.allow_production.arn
+    }
+  }
+}
+```
+
+### Stateful Rule Groups
+
+**Block Malicious Domains:**
+```hcl
+resource "aws_networkfirewall_rule_group" "block_domains" {
+  capacity = 100
+  name     = "block-malicious-domains"
+  type     = "STATEFUL"
+  
+  rule_group {
+    rules_source {
+      rules_source_list {
+        generated_rules_type = "DENYLIST"
+        target_types         = ["HTTP_HOST", "TLS_SNI"]
+        targets              = [
+          ".malware.com",
+          ".phishing.net",
+          ".cryptominer.org"
+        ]
+      }
+    }
+  }
+}
+```
+
+**Allow Production Traffic:**
+```hcl
+resource "aws_networkfirewall_rule_group" "allow_production" {
+  capacity = 100
+  name     = "allow-production-traffic"
+  type     = "STATEFUL"
+  
+  rule_group {
+    rules_source {
+      stateful_rule {
+        action = "PASS"
+        header {
+          destination      = "$HOME_NET"
+          destination_port = "443"
+          protocol         = "TCP"
+          direction        = "FORWARD"
+          source           = "$EXTERNAL_NET"
+          source_port      = "ANY"
+        }
+        rule_option {
+          keyword = "sid:1"
+        }
+      }
+    }
+    
+    rule_variables {
+      ip_sets {
+        key = "HOME_NET"
+        ip_set {
+          definition = ["10.1.0.0/16"]
+        }
+      }
+    }
+  }
+}
+```
+
+### Firewall Logging
+
+```hcl
+resource "aws_networkfirewall_logging_configuration" "main" {
+  firewall_arn = aws_networkfirewall_firewall.inspection.arn
+  
+  logging_configuration {
+    log_destination_config {
+      log_destination = {
+        bucketName = aws_s3_bucket.firewall_logs.bucket
+        prefix     = "firewall-logs/"
+      }
+      log_destination_type = "S3"
+      log_type            = "FLOW"
+    }
+    
+    log_destination_config {
+      log_destination = {
+        logGroup = aws_cloudwatch_log_group.firewall_alert.name
+      }
+      log_destination_type = "CloudWatchLogs"
+      log_type            = "ALERT"
+    }
+  }
+}
+```
+
+## Layer 4: Security Groups (Stateful Firewall)
+
+### Security Group Strategy
+
+**Principle:** Deny by default, allow only required traffic
+
+### Example: Three-Tier Application
+
+**ALB Security Group:**
+```hcl
+resource "aws_security_group" "alb" {
+  name_prefix = "alb-"
+  vpc_id      = aws_vpc.production.id
+  
+  ingress {
+    description = "HTTPS from Internet"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  
+  ingress {
+    description = "HTTP redirect"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  
+  egress {
+    description     = "To web tier"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.web.id]
+  }
+}
+```
+
+**Web Tier Security Group:**
+```hcl
+resource "aws_security_group" "web" {
+  name_prefix = "web-"
+  vpc_id      = aws_vpc.production.id
+  
+  ingress {
+    description     = "From ALB"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+  
+  egress {
+    description     = "To app tier"
+    from_port       = 8080
+    to_port         = 8080
+    protocol        = "tcp"
+    security_groups = [aws_security_group.app.id]
+  }
+}
+```
+
+**Application Tier Security Group:**
+```hcl
+resource "aws_security_group" "app" {
+  name_prefix = "app-"
+  vpc_id      = aws_vpc.production.id
+  
+  ingress {
+    description     = "From web tier"
+    from_port       = 8080
+    to_port         = 8080
+    protocol        = "tcp"
+    security_groups = [aws_security_group.web.id]
+  }
+  
+  egress {
+    description     = "To database"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.database.id]
+  }
+  
+  egress {
+    description = "To internet via NAT"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+```
+
+**Database Security Group:**
+```hcl
+resource "aws_security_group" "database" {
+  name_prefix = "db-"
+  vpc_id      = aws_vpc.production.id
+  
+  ingress {
+    description     = "From app tier"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.app.id]
+  }
+  
+  # No egress rules (database shouldn't initiate outbound)
+}
+```
+
+## Layer 5: Network ACLs (Stateless Firewall)
+
+### NACL Best Practices
+
+- Backup defense layer (Security Groups are primary)
+- Explicit deny rules for known bad actors
+- Subnet-level protection
+
+### Example NACL
+
+```hcl
+resource "aws_network_acl" "database" {
+  vpc_id     = aws_vpc.production.id
+  subnet_ids = aws_subnet.database[*].id
+  
+  # Allow from app tier
+  ingress {
+    protocol   = "tcp"
+    rule_no    = 100
+    action     = "allow"
+    cidr_block = "10.1.11.0/24"
+    from_port  = 5432
+    to_port    = 5432
+  }
+  
+  # Deny all other inbound
+  ingress {
+    protocol   = "-1"
+    rule_no    = 200
+    action     = "deny"
+    cidr_block = "0.0.0.0/0"
+    from_port  = 0
+    to_port    = 0
+  }
+  
+  # Allow response traffic
+  egress {
+    protocol   = "tcp"
+    rule_no    = 100
+    action     = "allow"
+    cidr_block = "10.1.11.0/24"
+    from_port  = 1024
+    to_port    = 65535
+  }
+  
+  tags = {
+    Name = "database-nacl"
+  }
+}
+```
+
+## Layer 6: Data Encryption
+
+### Encryption at Rest
+
+**KMS Key Management:**
+```hcl
+resource "aws_kms_key" "main" {
+  description             = "Main encryption key"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+  
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "Enable IAM User Permissions"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow services to use the key"
+        Effect = "Allow"
+        Principal = {
+          Service = [
+            "s3.amazonaws.com",
+            "rds.amazonaws.com",
+            "logs.amazonaws.com"
+          ]
+        }
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_kms_alias" "main" {
+  name          = "alias/main-key"
+  target_key_id = aws_kms_key.main.key_id
+}
+```
+
+**S3 Encryption:**
+```hcl
+resource "aws_s3_bucket" "data" {
+  bucket = "financial-data-bucket"
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "data" {
+  bucket = aws_s3_bucket.data.id
+  
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.main.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+```
+
+**RDS Encryption:**
+```hcl
+resource "aws_db_instance" "main" {
+  identifier     = "production-db"
+  engine         = "postgres"
+  engine_version = "15.3"
+  
+  storage_encrypted = true
+  kms_key_id       = aws_kms_key.main.arn
+  
+  # ... other configuration
+}
+```
+
+### Encryption in Transit
+
+**Certificate Manager:**
+```hcl
+resource "aws_acm_certificate" "main" {
+  domain_name               = "*.company.com"
+  subject_alternative_names = ["company.com"]
+  validation_method         = "DNS"
+  
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Automatic DNS validation
+resource "aws_route53_record" "cert_validation" {
+  for_each = {
+    for dvo in aws_acm_certificate.main.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+  
+  zone_id = aws_route53_zone.main.zone_id
+  name    = each.value.name
+  type    = each.value.type
+  records = [each.value.record]
+  ttl     = 60
+}
+```
+
+**ALB with TLS 1.2+:**
+```hcl
+resource "aws_lb_listener" "https" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = "443"
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = aws_acm_certificate.main.arn
+  
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.web.arn
+  }
+}
+```
+
+## Layer 7: Secrets Management
+
+### AWS Secrets Manager
+
+```hcl
+resource "aws_secretsmanager_secret" "db_password" {
+  name                    = "production/database/master-password"
+  recovery_window_in_days = 30
+  kms_key_id             = aws_kms_key.main.id
+  
+  rotation_rules {
+    automatically_after_days = 30
+  }
+}
+
+resource "aws_secretsmanager_secret_rotation" "db_password" {
+  secret_id           = aws_secretsmanager_secret.db_password.id
+  rotation_lambda_arn = aws_lambda_function.rotate_secret.arn
+  
+  rotation_rules {
+    automatically_after_days = 30
+  }
+}
+```
+
+## Monitoring & Alerting
+
+### CloudWatch Alarms
+
+```hcl
+resource "aws_cloudwatch_metric_alarm" "waf_blocked_requests" {
+  alarm_name          = "waf-high-blocked-requests"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "BlockedRequests"
+  namespace           = "AWS/WAFV2"
+  period              = "300"
+  statistic           = "Sum"
+  threshold           = "1000"
+  alarm_description   = "WAF blocking unusual amount of requests"
+  alarm_actions       = [aws_sns_topic.security_alerts.arn]
+  
+  dimensions = {
+    WebACL = aws_wafv2_web_acl.main.name
+    Region = data.aws_region.current.name
+  }
+}
+```
+
+## Compliance Mapping
+
+### PCI-DSS Requirements
+
+| Requirement | Control | Implementation |
+|-------------|---------|----------------|
+| 1.2.1 | Restrict inbound/outbound | Security Groups, NACLs |
+| 2.2.2 | Enable necessary services only | Service Control Policies |
+| 3.4 | Encryption at rest | KMS encryption |
+| 4.1 | Encryption in transit | TLS 1.2+, ACM |
+| 10.1 | Audit trail | CloudTrail, VPC Flow Logs |
+
+---
+
+**Document Version**: 1.0  
+**Last Updated**: 2025-12-11  
+**Owner**: Security Architecture Team
