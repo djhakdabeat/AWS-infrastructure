@@ -1,0 +1,440 @@
+# Deployment Prerequisites
+
+## Overview
+
+This guide outlines the prerequisites and initial setup required before deploying the AWS Security Infrastructure for Financial Services.
+
+## Table of Contents
+
+- [AWS Account Setup](#aws-account-setup)
+- [Required Tools](#required-tools)
+- [Access Requirements](#access-requirements)
+- [Network Prerequisites](#network-prerequisites)
+- [Compliance Requirements](#compliance-requirements)
+- [Pre-Deployment Checklist](#pre-deployment-checklist)
+
+## AWS Account Setup
+
+### Root Account Requirements
+
+1. **Email Address**
+   - Unique email for root account
+   - Use distribution list: `aws-root@company.com`
+   - Configure email forwarding to operations team
+
+2. **Multi-Factor Authentication (MFA)**
+   - Enable hardware MFA on root account (YubiKey recommended)
+   - Store backup codes in company vault
+   - Never use root account for daily operations
+
+3. **Contact Information**
+   - Company legal name
+   - Billing contact
+   - Operations contact
+   - Security contact
+
+4. **Payment Method**
+   - Corporate credit card or wire transfer
+   - Set up consolidated billing
+
+### AWS Organizations
+
+```bash
+# Enable AWS Organizations from root account
+aws organizations create-organization --feature-set ALL
+
+# Expected output:
+{
+    "Organization": {
+        "Id": "o-xxxxxxxxxxxx",
+        "Arn": "arn:aws:organizations::111111111111:organization/o-xxxxxxxxxxxx",
+        "FeatureSet": "ALL",
+        "MasterAccountArn": "arn:aws:organizations::111111111111:account/o-xxxxxxxxxxxx/111111111111",
+        "MasterAccountId": "111111111111",
+        "MasterAccountEmail": "aws-root@company.com"
+    }
+}
+```
+
+### Service Limits
+
+Request limit increases before deployment:
+
+| Service | Default Limit | Requested Limit |
+|---------|---------------|-----------------|
+| VPCs per region | 5 | 20 |
+| Elastic IPs | 5 | 20 |
+| NAT Gateways per AZ | 5 | 5 (sufficient) |
+| Transit Gateway | 5 | 10 |
+| Direct Connect Connections | 10 | 2 (sufficient) |
+| CloudTrail Trails | 5 | 10 |
+| Security Groups per VPC | 2500 | 2500 (sufficient) |
+
+```bash
+# Request limit increase via CLI
+aws service-quotas request-service-quota-increase \
+    --service-code vpc \
+    --quota-code L-F678F1CE \
+    --desired-value 20
+```
+
+## Required Tools
+
+### Local Development Environment
+
+#### 1. AWS CLI
+```bash
+# Install AWS CLI v2
+# macOS
+brew install awscli
+
+# Linux
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+
+# Verify installation
+aws --version
+# Expected: aws-cli/2.x.x
+```
+
+#### 2. Terraform
+```bash
+# Install Terraform 1.5+
+# macOS
+brew tap hashicorp/tap
+brew install hashicorp/tap/terraform
+
+# Linux
+wget https://releases.hashicorp.com/terraform/1.6.0/terraform_1.6.0_linux_amd64.zip
+unzip terraform_1.6.0_linux_amd64.zip
+sudo mv terraform /usr/local/bin/
+
+# Verify installation
+terraform version
+# Expected: Terraform v1.6.0 or higher
+```
+
+#### 3. Security Scanning Tools
+```bash
+# tfsec - Terraform security scanner
+brew install tfsec
+
+# Checkov - Policy-as-code scanner
+pip3 install checkov
+
+# git-secrets - Prevent committing secrets
+brew install git-secrets
+git secrets --register-aws --global
+```
+
+#### 4. Additional Tools
+```bash
+# jq - JSON processor
+brew install jq
+
+# yq - YAML processor
+brew install yq
+
+# pre-commit - Git hooks
+brew install pre-commit
+```
+
+### Configuration Files
+
+Create `~/.aws/config`:
+```ini
+[default]
+region = us-east-1
+output = json
+
+[profile finserv-root]
+region = us-east-1
+mfa_serial = arn:aws:iam::111111111111:mfa/your-username
+output = json
+
+[profile finserv-security]
+region = us-east-1
+role_arn = arn:aws:iam::222222222222:role/CrossAccountAdmin
+source_profile = finserv-root
+mfa_serial = arn:aws:iam::111111111111:mfa/your-username
+
+[profile finserv-prod]
+region = us-east-1
+role_arn = arn:aws:iam::555555555555:role/CrossAccountAdmin
+source_profile = finserv-root
+mfa_serial = arn:aws:iam::111111111111:mfa/your-username
+```
+
+## Access Requirements
+
+### IAM User Setup
+
+1. **Create IAM User (Root Account)**
+```bash
+aws iam create-user --user-name terraform-deploy
+
+aws iam attach-user-policy \
+    --user-name terraform-deploy \
+    --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+
+# Create access key
+aws iam create-access-key --user-name terraform-deploy
+```
+
+2. **Enable MFA**
+```bash
+# Virtual MFA device
+aws iam create-virtual-mfa-device \
+    --virtual-mfa-device-name terraform-deploy \
+    --outfile QRCode.png \
+    --bootstrap-method QRCodePNG
+
+# Enable MFA
+aws iam enable-mfa-device \
+    --user-name terraform-deploy \
+    --serial-number arn:aws:iam::111111111111:mfa/terraform-deploy \
+    --authentication-code-1 123456 \
+    --authentication-code-2 789012
+```
+
+### AWS SSO (Recommended for Production)
+
+1. **Enable AWS SSO**
+   - Console: AWS SSO → Enable
+   - Choose identity source (AWS SSO directory or external IdP)
+
+2. **Create Permission Sets**
+```bash
+# Administrator access
+aws sso-admin create-permission-set \
+    --instance-arn arn:aws:sso:::instance/ssoins-xxxxx \
+    --name AdministratorAccess \
+    --description "Full administrator access" \
+    --session-duration PT4H
+
+# Attach AWS managed policy
+aws sso-admin attach-managed-policy-to-permission-set \
+    --instance-arn arn:aws:sso:::instance/ssoins-xxxxx \
+    --permission-set-arn arn:aws:sso:::permissionSet/xxxxx \
+    --managed-policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+```
+
+### GitHub Actions (for CI/CD)
+
+1. **Create OIDC Provider**
+```bash
+aws iam create-open-id-connect-provider \
+    --url https://token.actions.githubusercontent.com \
+    --client-id-list sts.amazonaws.com \
+    --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+```
+
+2. **Create IAM Role for GitHub Actions**
+```hcl
+resource "aws_iam_role" "github_actions" {
+  name = "GitHubActionsRole"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com"
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        }
+        StringLike = {
+          "token.actions.githubusercontent.com:sub" = "repo:YourOrg/aws-finserv-security-infrastructure:*"
+        }
+      }
+    }]
+  })
+}
+```
+
+## Network Prerequisites
+
+### IP Address Planning
+
+Document your IP address scheme:
+
+| Environment | CIDR Block | AWS Region |
+|-------------|------------|------------|
+| Production | 10.1.0.0/16 | us-east-1 |
+| Production DR | 10.2.0.0/16 | us-west-2 |
+| Development | 10.10.0.0/16 | us-east-1 |
+| Staging | 10.11.0.0/16 | us-east-1 |
+| Shared Services | 10.100.0.0/16 | us-east-1 |
+| Security/Inspection | 10.0.0.0/16 | us-east-1 |
+| On-Premises | 192.168.0.0/16 | N/A |
+
+### Direct Connect Requirements
+
+1. **Colocation Facility**
+   - Identify AWS Direct Connect location
+   - Confirm cross-connect availability
+   - Order circuits from your provider
+
+2. **BGP Configuration**
+   - ASN for your network (private: 64512-65534)
+   - BGP authentication keys
+   - Route advertisements
+
+3. **Letter of Authorization (LOA)**
+   - Request from AWS Console
+   - Provide to colocation provider
+   - Allow 2-4 weeks for provisioning
+
+### DNS Planning
+
+1. **Route 53 Hosted Zones**
+   - Public zone: `company.com`
+   - Private zones: `internal.company.com`
+
+2. **Domain Validation**
+   - Control over DNS records
+   - Ability to create TXT records for validation
+
+## Compliance Requirements
+
+### Documentation Required
+
+1. **Security Policy Documents**
+   - Information Security Policy
+   - Incident Response Plan
+   - Business Continuity Plan
+   - Acceptable Use Policy
+   - Data Classification Policy
+
+2. **Network Diagrams**
+   - Current on-premises network
+   - Proposed AWS architecture
+   - Data flow diagrams
+
+3. **Compliance Mappings**
+   - PCI-DSS requirements
+   - SOX controls
+   - SOC 2 criteria
+
+### Audit Preparation
+
+1. **Third-Party Assessor**
+   - QSA for PCI-DSS (if applicable)
+   - CPA firm for SOX
+   - Auditor for SOC 2
+
+2. **Evidence Collection**
+   - CloudTrail logs (13 months)
+   - Config snapshots
+   - Security Hub findings
+   - Vulnerability scans
+
+## Pre-Deployment Checklist
+
+### Account Setup
+- [ ] Root account created with secure email
+- [ ] Hardware MFA enabled on root account
+- [ ] AWS Organizations enabled
+- [ ] Billing alerts configured
+- [ ] Support plan activated (Business or Enterprise)
+- [ ] Service limits reviewed and increased
+
+### Tools & Access
+- [ ] AWS CLI installed and configured
+- [ ] Terraform installed (v1.5+)
+- [ ] Security scanning tools installed
+- [ ] IAM users created with MFA
+- [ ] AWS SSO configured (if using)
+- [ ] GitHub Actions OIDC setup (if using)
+
+### Network Planning
+- [ ] IP address scheme documented
+- [ ] Direct Connect ordered
+- [ ] DNS domains identified
+- [ ] VPN backup planned
+
+### Security & Compliance
+- [ ] Security policies documented
+- [ ] Compliance requirements mapped
+- [ ] Audit schedule established
+- [ ] Incident response contacts identified
+
+### Repository Setup
+- [ ] GitHub repository created
+- [ ] Branch protection rules configured
+- [ ] CI/CD pipelines defined
+- [ ] Secrets stored in GitHub Secrets
+
+### Team Preparation
+- [ ] Team members identified
+- [ ] Roles and responsibilities assigned
+- [ ] Training scheduled
+- [ ] Communication channels established
+
+## Cost Estimation
+
+### Initial Setup Costs
+- AWS Support Plan: $100-$15,000/month (depends on plan)
+- AWS Control Tower: ~$500/month
+- Direct Connect: ~$3,000/month (2x10G)
+- Third-party audits: $50,000-$150,000 annually
+
+### Ongoing Operational Costs
+See [Cost Analysis](../architecture/05-cost-analysis.md)
+
+## Training Requirements
+
+### Team Training
+1. **AWS Fundamentals** (40 hours)
+   - AWS Solutions Architect Associate
+   - AWS Security Specialty
+
+2. **Compliance Training** (16 hours)
+   - PCI-DSS Fundamentals
+   - SOX IT Controls
+   - SOC 2 Requirements
+
+3. **Tool-Specific Training** (24 hours)
+   - Terraform for AWS
+   - AWS Security Services
+   - Incident Response
+
+## Timeline
+
+### Typical Implementation Timeline
+
+| Phase | Duration | Activities |
+|-------|----------|------------|
+| Planning | 2 weeks | Requirements, design, approvals |
+| Preparation | 2 weeks | Tool setup, training, Direct Connect order |
+| Foundation | 1 week | Organizations, Control Tower, accounts |
+| Network | 2 weeks | VPCs, Transit Gateway, Direct Connect |
+| Security | 2 weeks | Security controls, monitoring |
+| Testing | 1 week | Security testing, compliance validation |
+| Production | 1 week | Production deployment, cutover |
+| **Total** | **11 weeks** | |
+
+## Next Steps
+
+After completing all prerequisites:
+
+1. Review [Control Tower Setup](02-control-tower-setup.md)
+2. Configure [Network Deployment](03-network-deployment.md)
+3. Implement [Security Controls](04-security-deployment.md)
+
+## Support
+
+For questions during setup:
+- **Technical**: devops@company.com
+- **Compliance**: compliance@company.com
+- **AWS TAM**: your-tam@amazon.com (Enterprise Support)
+
+---
+
+**Document Version**: 1.0  
+**Last Updated**: 2025-12-11  
+**Owner**: Cloud Engineering Team
